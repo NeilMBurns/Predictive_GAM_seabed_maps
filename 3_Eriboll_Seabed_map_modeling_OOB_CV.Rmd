@@ -1,0 +1,788 @@
+---
+title: "Loch Eriboll seabed map"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+#setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#required packages
+
+ library(sp)
+ library(RColorBrewer)
+ library(fields)
+ library(maptools)
+ library(raster)
+ library(rgdal)
+ library(gstat)
+ library(flux)
+ library(randomForest)
+ library(mgcv)
+
+
+########## import data ########
+
+### Shape files in GIS data folder 
+#                       - shore <- shoreline.shp
+
+
+# map extent
+new.ext<- extent(c(xmin=238800, xmax=252000, ymin=953700, ymax=969700))
+new.ext
+
+shore<- crop(shore, new.ext)
+
+### rasters
+# in GIS data folder- depth <- bathy.grd
+#                   -  slo <- slope.grd
+#                   -  asp <- aspect.grd
+
+
+# Data file in GIS data folder
+#                   - dat<- Loch_Eriboll_substratum_combine_cob_boulder.csv
+#                   - oob.dat<- Loch_Eriboll_2022data_substrata.csv
+
+
+# Data file in GIS/Substrata_Output_from_script_1 folder
+
+# substrata
+# mud.r<- mud_pred.grd
+# 
+# muddy_sand.r<- muddy_s_pred.grd
+# 
+# sand.r<- sand_pred.grd
+# 
+# 
+# gravel.r<- gravel_pred.grd
+# 
+# cob_boulder.r<- cob_boul_pred.grd
+# 
+# rock.r<- rock_pred.grd
+
+
+#########################
+# Read in rasters of OK and RF for supplemental material
+####################################
+
+# RF
+# mud.rf<- mud_pred_rf.grd
+# 
+# muddy_sand.rf<- muddy_s_rf_pred.grd
+# 
+# sand.rf<- sand_rf_pred.grd
+# 
+# 
+# gravel.rf<- gravel_rf_pred.grd
+# 
+# cob_boulder.rf<- cob_boul_rf_pred.grd
+# 
+# rock.rf<- rock_rf_pred.grd
+
+
+# Krig
+# mud.k<- mud_pred_k.grd
+# 
+# muddy_sand.k<- muddy_s_k_pred.grd
+# 
+# sand.k<- sand_k_pred.grd
+# 
+# 
+# gravel.k<- gravel_k_pred.grd
+# 
+# cob_boulder.k<- cob_boul_k_pred.grd
+# 
+# rock.k<- rock_k_pred.grd
+
+
+
+sub<- subset(dat, dat$Substratum1!='')
+sub<- sub[,-12]
+sub<- droplevels(sub)
+
+
+str(sub)
+summary(sub)
+
+oob.sub<- subset(oob.dat, oob.dat$Substratum1!='')
+oob.sub<- droplevels(oob.sub)
+
+
+sub$Substratum1<- as.factor(sub$Substratum1)
+sub$Substratum2<- as.factor(sub$Substratum2)
+sub$Substratum3<- as.factor(sub$Substratum3)
+
+
+oob.sub$Substratum1<- as.factor(oob.sub$Substratum1)
+oob.sub$Substratum2<- as.factor(oob.sub$Substratum2)
+oob.sub$Substratum3<- as.factor(oob.sub$Substratum3)
+oob.sub$Substratum4<- as.factor(oob.sub$Substratum4)
+
+
+levels(sub$Substratum1)
+sub$Substratum1<- factor(sub$Substratum1, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+levels(sub$Substratum1)
+oob.sub$Substratum1<- factor(oob.sub$Substratum1, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+
+levels(sub$Substratum2)
+sub$Substratum2<- factor(sub$Substratum2, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+oob.sub$Substratum2<- factor(oob.sub$Substratum2, levels = c("sand", "gravel", "cob_boulder", "rock"))
+
+levels(sub$Substratum3)
+sub$Substratum3<- factor(sub$Substratum3, levels = c("sand", "cob_boulder"))
+
+oob.sub$Substratum3<- factor(oob.sub$Substratum3, levels = c("sand", "gravel", "cob_boulder"))
+
+levels(oob.sub$Substratum4)
+oob.sub$Substratum4<- factor(oob.sub$Substratum4, levels = c("cob_boulder"))
+
+table(sub$Substratum1)
+table(sub$Substratum2)
+table(sub$Substratum3)
+
+
+table(oob.sub$Substratum1)
+table(oob.sub$Substratum2)
+table(oob.sub$Substratum3)
+table(oob.sub$Substratum4)
+
+
+
+################################## coord system to assign 
+###
+
+#'#set CRS
+CRS1.code <- CRS(SRS_string='EPSG:4326')
+
+#Display the stored CRS using comment()
+cat(comment(CRS1.code), "\n")
+# Store the wkt in a variable
+wkt1 <- comment(CRS1.code)
+
+# Use this to assign the CRS of another sp-object
+CRS.wgs84 <- CRS(SRS_string = wkt1)
+
+### projections ####
+
+
+CRS2.code <- CRS(SRS_string='EPSG:27700')
+#Display the stored CRS using comment()
+cat(comment(CRS2.code), "\n")
+# Store the wkt in a variable
+wkt2 <- comment(CRS2.code)
+
+# Use this to assign the CRS of another sp-object
+CRS.NG <- CRS(SRS_string = wkt2)
+
+
+## make an spdf from the data
+coord.tmp<- cbind(sub$x, sub$y)
+sub.spdf<- SpatialPointsDataFrame(coord.tmp, data=data.frame(sub))
+proj4string(sub.spdf) <- CRS.wgs84
+sub.spdfT<- spTransform(sub.spdf,  CRS.NG)
+
+coord.tmp<- cbind(oob.sub$long, oob.sub$lat)
+oob.sub.spdf<- SpatialPointsDataFrame(coord.tmp, data=data.frame(oob.sub))
+proj4string(oob.sub.spdf) <- CRS.wgs84
+oob.sub.spdfT<- spTransform(oob.sub.spdf,  CRS.NG)
+
+
+```
+
+
+#Background map
+```{r}
+
+
+hill<- hillShade(slo, asp, angle=55, direction=100, normalize =T)
+hill.trim<- hillShade(slo.trim, asp.trim, angle=55, direction=100, normalize =T)
+
+
+hill.col<- colorRampPalette(c('floralwhite','antiquewhite1', 'antiquewhite2', 'antiquewhite3', 'antiquewhite4'), bias=0.5)
+
+
+depth.heat<- colorRampPalette(rev(brewer.pal(9,'Blues')[2:9]))
+
+
+
+```
+
+
+# Substrata vecrors tidy 
+```{r}
+
+head(sub.spdfT)
+levels(sub.spdfT@data$Substratum1)
+levels(sub.spdfT@data$Substratum2)
+levels(sub.spdfT@data$Substratum3)
+
+
+plot(sub.spdfT, col='white')
+plot(hill.trim, col=hill.col(1000), legend=F, add=T)
+plot(depth, add=T, col=depth.heat(1000), legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+sub.spdfT@data$Substratum2<- as.factor(sub.spdfT@data$Substratum2)
+sub.spdfT@data$Substratum3<- as.factor(sub.spdfT@data$Substratum3)
+
+
+
+plot(sub.spdfT, pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[sub.spdfT@data$Substratum1], cex=2)
+
+sub.spdfT2<- sub.spdfT[,10]
+sub.spdfT3<- sub.spdfT[,11]
+
+
+### write function to remove '' from spatial data
+sp.na.omit <- function(x, margin=1) {
+  if (!inherits(x, "SpatialPointsDataFrame") & !inherits(x, "SpatialPolygonsDataFrame")) 
+    stop("MUST BE sp SpatialPointsDataFrame OR SpatialPolygonsDataFrame CLASS OBJECT") 
+  na.index <- unique(as.data.frame(which(is.na(x@data),arr.ind=TRUE))[,margin])
+    if(margin == 1) {  
+      cat("DELETING ROWS: ", na.index, "\n") 
+        return( x[-na.index,]  ) 
+    }
+    if(margin == 2) {  
+      cat("DELETING COLUMNS: ", na.index, "\n") 
+        return( x[,-na.index]  ) 
+    }
+ }
+
+# DELETE NA's IN meuse AND SHOW CHANGE IN dim
+sub.spdfT2.trim <- sp.na.omit(sub.spdfT2)     
+  dim(sub.spdfT2)
+    dim(sub.spdfT2.trim)
+    
+sub.spdfT2.trim@data$Substratum2<- factor(sub.spdfT2.trim@data$Substratum2, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+
+
+sub.spdfT3.trim <- sp.na.omit(sub.spdfT3)     
+  dim(sub.spdfT3)
+    dim(sub.spdfT3.trim) 
+    
+sub.spdfT3.trim@data$Substratum3<- factor(sub.spdfT3.trim@data$Substratum3, levels = c("sand", "cob_boulder"))
+    
+
+ 
+```
+
+# OOB Substrata vecrors tidy 
+```{r}
+
+head(oob.sub.spdfT)
+levels(oob.sub.spdfT@data$Substratum1)
+levels(oob.sub.spdfT@data$Substratum2)
+levels(oob.sub.spdfT@data$Substratum3)
+levels(oob.sub.spdfT@data$Substratum4)
+
+
+oob.sub.spdfT@data$Substratum2<- as.factor(oob.sub.spdfT@data$Substratum2)
+oob.sub.spdfT@data$Substratum3<- as.factor(oob.sub.spdfT@data$Substratum3)
+oob.sub.spdfT@data$Substratum4<- as.factor(oob.sub.spdfT@data$Substratum4)
+
+
+oob.sub.spdfT2<- oob.sub.spdfT[,9]
+oob.sub.spdfT3<- oob.sub.spdfT[,10]
+oob.sub.spdfT4<- oob.sub.spdfT[,11]
+
+
+### function to remove '' from spatial data
+sp.na.omit <- function(x, margin=1) {
+  if (!inherits(x, "SpatialPointsDataFrame") & !inherits(x, "SpatialPolygonsDataFrame")) 
+    stop("MUST BE sp SpatialPointsDataFrame OR SpatialPolygonsDataFrame CLASS OBJECT") 
+  na.index <- unique(as.data.frame(which(is.na(x@data),arr.ind=TRUE))[,margin])
+    if(margin == 1) {  
+      cat("DELETING ROWS: ", na.index, "\n") 
+        return( x[-na.index,]  ) 
+    }
+    if(margin == 2) {  
+      cat("DELETING COLUMNS: ", na.index, "\n") 
+        return( x[,-na.index]  ) 
+    }
+ }
+
+
+# DELETE NA's IN meuse AND SHOW CHANGE IN dim
+oob.sub.spdfT2.trim <- sp.na.omit(oob.sub.spdfT2)     
+  dim(oob.sub.spdfT2)
+    dim(oob.sub.spdfT2.trim)
+    
+oob.sub.spdfT2.trim@data$Substratum2<- factor(oob.sub.spdfT2.trim@data$Substratum2, levels = c("sand", "gravel", "cob_boulder", "rock"))
+
+oob.sub.spdfT3.trim <- sp.na.omit(oob.sub.spdfT3)     
+  dim(oob.sub.spdfT3)
+    dim(oob.sub.spdfT3.trim) 
+    
+oob.sub.spdfT3.trim@data$Substratum3<- factor(oob.sub.spdfT3.trim@data$Substratum3, levels = c("sand", "gravel", "cob_boulder"))
+    
+
+oob.sub.spdfT4.trim <- sp.na.omit(oob.sub.spdfT4)     
+  dim(oob.sub.spdfT4)
+    dim(oob.sub.spdfT4.trim) 
+    
+oob.sub.spdfT4.trim@data$Substratum4<- factor(oob.sub.spdfT4.trim@data$Substratum4, levels = c("cob_boulder"))
+    
+  
+```
+
+
+
+## GAM cut off prec vs acc
+```{r}
+
+
+# if else loop for truth yes no
+
+truth<- data.frame(
+    'muds'= ifelse(oob.sub.spdfT$Substratum1 == "mud", "Yes", 
+           ifelse(oob.sub.spdfT2.trim$Substratum2 == "mud", "Yes",
+              ifelse(oob.sub.spdfT3.trim$Substratum3 == "mud", "Yes",    
+                  ifelse(oob.sub.spdfT4.trim$Substratum4 == "mud", "Yes","No")))),
+           
+           'muddy_s'= ifelse(oob.sub.spdfT$Substratum1 == "muddy_sand", "Yes", 
+                    ifelse(oob.sub.spdfT2.trim$Substratum2 == "muddy_sand", "Yes",
+                   ifelse(oob.sub.spdfT3.trim$Substratum3 == "muddy_sand", "Yes",    
+                       ifelse(oob.sub.spdfT4.trim$Substratum4 == "muddy_sand", "Yes","No")))),
+           
+           'sands'= ifelse(oob.sub.spdfT$Substratum1 == "sand ", "Yes", 
+                    ifelse(oob.sub.spdfT2.trim$Substratum2 == "sand", "Yes",
+                     ifelse(oob.sub.spdfT3.trim$Substratum3 == "sand", "Yes",    
+                          ifelse(oob.sub.spdfT4.trim$Substratum4 == "sand", "Yes", "No")))),
+           
+           'gravels'= ifelse(oob.sub.spdfT$Substratum1 == "gravel", "Yes", 
+                         ifelse(oob.sub.spdfT2.trim$Substratum2 == "gravel", "Yes",
+                          ifelse(oob.sub.spdfT3.trim$Substratum3 == "gravel", "Yes",    
+                              ifelse(oob.sub.spdfT4.trim$Substratum4 == "gravel", "Yes","No")))),
+           
+           'cobs'= ifelse(oob.sub.spdfT$Substratum1 == "cob_boulder ", "Yes", 
+                     ifelse(oob.sub.spdfT2.trim$Substratum2 == "cob_boulder ", "Yes",
+                              ifelse(oob.sub.spdfT3.trim$Substratum3 == "cob_boulder", "Yes",    
+                              ifelse(oob.sub.spdfT4.trim$Substratum4 == "cob_boulder", "Yes","No")))),
+           
+           'rocks'= ifelse(oob.sub.spdfT$Substratum1 == "rock", "Yes", 
+                        ifelse(oob.sub.spdfT2.trim$Substratum2 == "rock", "Yes",
+                              ifelse(oob.sub.spdfT3.trim$Substratum3 == "rock", "Yes",    
+                                  ifelse(oob.sub.spdfT4.trim$Substratum4 == "rock", "Yes","No")))) )
+
+truth.sp<- SpatialPointsDataFrame(coords= coordinates(oob.sub.spdfT), proj4string = CRS.NG, data= truth)
+
+
+# vary prob from 0 to 1
+
+p.vals<- seq(from=0, to =1, by=0.01)
+# make starting raster stack
+
+sub.stack<- stack(mud.r, muddy_sand.r, sand.r, gravel.r, cob_boulder.r, rock.r)
+    sub.trim<- sub.stack
+sub.trim[sub.trim == 0] <- NA
+
+
+## make a vector to hold accuracy
+
+acc.vals<- data.frame('acc.val'=rep(NA, length(p.vals)))
+overall.acc<- NA
+first.run=TRUE
+## for loop going through p.vals
+
+for (k in 1: length(truth)){
+    layer.trim<- sub.trim[[k]]
+
+
+for (i in 1:length(p.vals)){
+    
+    layer.trim[layer.trim< p.vals[i]] <- NA
+    plot(layer.trim)
+    pred.prob<- raster::extract(layer.trim, truth.sp[k])
+    pred.bin<- pred.prob/pred.prob
+    pred.bin [is.na(pred.bin)] <- 0
+  
+pred.bin<- ifelse(pred.bin==1, "Yes", "No")
+acc.val<- sum(as.numeric(pred.bin == truth[k]))/length(pred.bin)
+
+
+
+acc.vals[i,]<- acc.val
+
+
+}
+
+if (first.run)
+{
+overall.acc<- acc.vals
+  first.run<- FALSE
+} else {
+  overall.acc <- cbind(overall.acc, acc.vals)
+}
+  
+
+}
+
+    
+    
+overall.acc
+acc.comb<- apply(overall.acc, MARGIN=1, FUN=mean)
+acc.sd<- apply(overall.acc, MARGIN=1, FUN=sd)
+acc.up<- acc.comb+(acc.sd/sqrt(length(overall.acc))*1.96)
+acc.lo<- acc.comb-(acc.sd/sqrt(length(overall.acc))*1.96)
+
+
+
+plot(p.vals, acc.comb, type='l', ylim=c(0,1), lwd=3, xlim= c(0,1.1))
+legend('bottomright', bg='white', legend=leg, fill= test.cols2)
+points(p.vals[which(acc.comb==max(acc.comb))],acc.comb[which(acc.comb==max(acc.comb))], pch=18, cex=3)
+text(p.vals[which(acc.comb==max(acc.comb))]+ 0.05, acc.comb[which(acc.comb==max(acc.comb))]+0.05, labels= round( acc.comb[which(acc.comb==max(acc.comb))], 2))
+
+    lines(p.vals, acc.up, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+    lines(p.vals, acc.lo, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+
+for (j in 1:ncol(overall.acc)){
+
+    lines(p.vals, overall.acc[,j], col=test.cols2[j], lwd=2)  
+    points(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))]), overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1], pch=18, cex=2, col=test.cols2[j] )
+    
+    text(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))])+ 0.05,  overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1]+0.03,
+         labels= round( overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))], 2), col=test.cols2[j])
+
+    
+}
+
+
+
+# average accuracy
+p.vals[which(acc.comb==max(acc.comb))]
+acc.comb[which(acc.comb==max(acc.comb))]
+
+#AUC
+flux::auc(p.vals, acc.comb)
+
+# individual substrata
+
+for (x in 1:ncol(overall.acc)){
+print(max(p.vals[which( overall.acc[,x]==max( overall.acc[,x]))]))
+
+}
+
+
+
+
+
+for (z in 1:ncol(overall.acc)){
+print(flux::auc(p.vals, overall.acc[,z]))
+
+}
+
+
+
+```
+
+## K cut off prec vs acc
+```{r}
+
+
+# vary prob from 0 to 1
+
+p.vals<- seq(from=0.001, to =1, by=0.01)
+# make starting raster stack
+
+k.stack<- stack(mud.k, muddy_sand.k, sand.k, gravel.k, cob_boulder.k, rock.k)
+    k.trim<- k.stack
+k.trim[k.trim == 0] <- NA
+
+
+## make a vector to hold accuracy
+
+acc.vals<- data.frame('acc.val'=rep(NA, length(p.vals)))
+overall.acc<- NA
+first.run=TRUE
+## for loop going through p.vals
+
+for (k in 1: length(truth)){
+    layer.trim<- k.trim[[k]]
+
+
+for (i in 1:length(p.vals)){
+    
+    layer.trim[layer.trim< p.vals[i]] <- NA
+    plot(layer.trim)
+    pred.prob<- raster::extract(layer.trim, truth.sp[k])
+    pred.bin<- pred.prob/pred.prob
+    pred.bin [is.na(pred.bin)] <- 0
+  
+pred.bin<- ifelse(pred.bin==1, "Yes", "No")
+acc.val<- sum(as.numeric(pred.bin == truth[k]))/length(pred.bin)
+
+
+
+acc.vals[i,]<- acc.val
+
+
+}
+
+if (first.run)
+{
+overall.acc<- acc.vals
+  first.run<- FALSE
+} else {
+  overall.acc <- cbind(overall.acc, acc.vals)
+}
+  
+
+}
+
+    
+     
+overall.acc
+acc.comb<- apply(overall.acc, MARGIN=1, FUN=mean)
+acc.sd<- apply(overall.acc, MARGIN=1, FUN=sd)
+acc.up<- acc.comb+(acc.sd/sqrt(length(overall.acc))*1.96)
+acc.lo<- acc.comb-(acc.sd/sqrt(length(overall.acc))*1.96)
+
+
+
+plot(p.vals, acc.comb, type='l', ylim=c(0,1), lwd=3, xlim= c(0,1.1))
+legend('bottomright', bg='white', legend=leg, fill= test.cols2)
+points(max(p.vals[which(acc.comb==max(acc.comb))]),acc.comb[which(acc.comb==max(acc.comb))][1], pch=18, cex=3)
+text(max(p.vals[which(acc.comb==max(acc.comb))])+ 0.05, acc.comb[which(acc.comb==max(acc.comb))][1]+0.05, labels= round( acc.comb[which(acc.comb==max(acc.comb))], 2))
+
+    lines(p.vals, acc.up, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+    lines(p.vals, acc.lo, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+
+for (j in 1:ncol(overall.acc)){
+
+    lines(p.vals, overall.acc[,j], col=test.cols2[j], lwd=2)  
+    points(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))]), overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1], pch=18, cex=2, col=test.cols2[j] )
+    
+    text(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))])+ 0.05,  overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1]+0.03,
+         labels= round( overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))], 2), col=test.cols2[j])
+
+    
+}
+
+
+
+# average accuracy 
+max(p.vals[which(acc.comb==max(acc.comb))])
+acc.comb[which(acc.comb==max(acc.comb))][1]
+
+# AUC
+flux::auc(p.vals, acc.comb)
+
+# individual substrata - p cut offs
+
+for (x in 1:ncol(overall.acc)){
+print(max(p.vals[which( overall.acc[,x]==max( overall.acc[,x]))]))
+
+}
+
+
+
+for (z in 1:ncol(overall.acc)){
+print(flux::auc(p.vals, overall.acc[,z]))
+
+}
+
+```
+
+
+
+## RF cut off prec vs acc
+```{r}
+
+# vary prob from 0 to 1
+
+p.vals<- seq(from=0, to =1, by=1)
+# make starting raster stack
+plot(mud.rf-1)
+rf.stack<- stack(mud.rf-1, muddy_sand.rf-1, sand.rf-1, gravel.rf-1, cob_boulder.rf-1, rock.rf-1)
+    rf.trim<- rf.stack
+
+
+## make a vector to hold accuracy
+
+acc.vals<- data.frame('acc.val'=rep(NA, length(p.vals)))
+overall.acc<- NA
+first.run=TRUE
+## for loop going through p.vals
+
+for (k in 1: length(truth)){
+    layer.trim<- rf.stack[[k]]
+
+
+for (i in 1:length(p.vals)){
+    
+    layer.trim[layer.trim< p.vals[i]] <- NA
+    plot(layer.trim)
+    pred.prob<- raster::extract(layer.trim, truth.sp[k])
+    pred.bin<- pred.prob/pred.prob
+    pred.bin [is.na(pred.bin)] <- 0
+  
+pred.bin<- ifelse(pred.bin==1, "Yes", "No")
+acc.val<- sum(as.numeric(pred.bin == truth[k]))/length(pred.bin)
+
+
+
+acc.vals[i,]<- acc.val
+
+
+}
+
+if (first.run)
+{
+overall.acc<- acc.vals
+  first.run<- FALSE
+} else {
+  overall.acc <- cbind(overall.acc, acc.vals)
+}
+  
+
+}
+
+ 
+     
+overall.acc
+acc.comb<- apply(overall.acc, MARGIN=1, FUN=mean)
+acc.sd<- apply(overall.acc, MARGIN=1, FUN=sd)
+acc.up<- acc.comb+(acc.sd/sqrt(length(overall.acc))*1.96)
+acc.lo<- acc.comb-(acc.sd/sqrt(length(overall.acc))*1.96)
+
+
+plot(p.vals, acc.comb, type='l', ylim=c(0,1), lwd=3, xlim= c(0,1.1))
+legend('bottomright', bg='white', legend=leg, fill= test.cols2)
+points(max(p.vals[which(acc.comb==max(acc.comb))]),acc.comb[which(acc.comb==max(acc.comb))][1], pch=18, cex=3)
+text(max(p.vals[which(acc.comb==max(acc.comb))])+ 0.05, acc.comb[which(acc.comb==max(acc.comb))][1]+0.05, labels= round( acc.comb[which(acc.comb==max(acc.comb))], 2))
+
+    lines(p.vals, acc.up, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+    lines(p.vals, acc.lo, ylim=c(0,1), lty=2, lwd=2, xlim= c(0,1))
+
+for (j in 1:ncol(overall.acc)){
+
+    lines(p.vals, overall.acc[,j], col=test.cols2[j], lwd=2)  
+    points(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))]), overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1], pch=18, cex=2, col=test.cols2[j] )
+    
+    text(max(p.vals[which( overall.acc[,j]==max( overall.acc[,j]))])+ 0.05,  overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))][1]+0.03,
+         labels= round( overall.acc[,j][which( overall.acc[,j]==max( overall.acc[,j]))], 2), col=test.cols2[j])
+
+    
+}
+
+
+
+# average accuracy 
+max(p.vals[which(acc.comb==max(acc.comb))])
+acc.comb[which(acc.comb==max(acc.comb))][1]
+#AUC
+flux::auc(p.vals, acc.comb)
+
+# individual substrata - p cut offs
+
+for (x in 1:ncol(overall.acc)){
+print(max(p.vals[which( overall.acc[,x]==max( overall.acc[,x]))]))
+
+}
+
+
+
+```
+
+
+
+## combined map
+```{r}
+
+# Trim each raster as required contain values desired probability density
+density(mud.r)
+density(muddy_sand.r)
+density(sand.r)
+density(gravel.r)
+density(cob_boulder.r)
+density(rock.r)
+
+
+mud.trim<- mud.r
+muddy_sand.trim<- muddy_sand.r
+sand.trim<- sand.r
+gravel.trim<- gravel.r
+cob_boulder.trim<- cob_boulder.r
+rock.trim<- rock.r
+
+
+mud.trim [mud.trim< 0.51] <- NA
+muddy_sand.trim [muddy_sand.trim< 0.51] <- NA
+sand.trim [sand.trim< 0.11] <- NA
+gravel.trim [gravel.trim< 0.05] <- NA
+cob_boulder.trim [cob_boulder.trim< 0.11] <- NA
+rock.trim [rock.trim< 0.51] <- NA
+
+
+# addalpha()
+addalpha <- function(colors, alpha=1.0) {
+  r <- col2rgb(colors, alpha=T)
+  # Apply alpha
+  r[4,] <- alpha*255
+  r <- r/255.0
+  return(rgb(r[1,], r[2,], r[3,], r[4,]))
+}
+
+# set up colours
+mud.alt <- colorRampPalette(c('wheat', test.cols[1], test.cols2[1]), alpha=TRUE, bias=1)
+mud.s.alt <- colorRampPalette(c('darkseagreen1', test.cols[2], test.cols2[2]), alpha=TRUE, bias=1)
+sand.alt <- colorRampPalette(c('lightgoldenrodyellow', test.cols[3], test.cols2[3]), alpha=TRUE, bias=1.5)
+gravel.alt <- colorRampPalette(c('lightpink1', test.cols[4], test.cols2[4]), alpha=TRUE, bias=0.3)
+cob_bol.alt<- colorRampPalette(c('thistle1', test.cols[5], test.cols2[5]), alpha=TRUE, bias=1.5)
+rock.alt<- colorRampPalette(c('lightsteelblue2', test.cols[6], test.cols2[6]), alpha=TRUE, bias=1)
+
+
+
+mud.alt.single <- addalpha(test.cols2[1], alpha=0.7)
+mud.s.alt.single <- addalpha(test.cols2[2], alpha=0.7)
+sand.alt.single <- addalpha(test.cols2[3], alpha=0.7)
+gravel.alt.single <-addalpha(test.cols2[4], alpha=0.7)
+cob_bol.alt.single<- addalpha(test.cols2[5], alpha=0.7)
+rock.alt.single<- addalpha(test.cols2[6], alpha=0.7)
+
+
+## combined plot
+par(mar=c(0,0,0,0)+0.1)
+
+plot(sub.spdfT, col='white')
+plot(hill.trim, col=hill.col(1000), legend=F,  axes=FALSE, box=F, add=T)
+plot(cob_boulder.trim, add=T, legend=FALSE, axes=FALSE, col=cob_bol.alt(1000), alpha=0.7)
+plot(gravel.trim, add=T, legend=FALSE, axes=FALSE, col=gravel.alt(1000), alpha=0.4)
+plot(sand.trim, add=T, legend=FALSE, axes=FALSE, col=sand.alt(1000), alpha=0.6)
+plot(muddy_sand.trim, add=T, legend=FALSE, axes=FALSE, col=mud.s.alt(1000), alpha=0.5)
+plot(rock.trim, add=T, legend=FALSE, axes=FALSE, col=rock.alt(1000), alpha=0.8)
+plot(mud.trim, add=T, legend=FALSE, axes=FALSE, col=mud.alt(1000), alpha=0.6)
+plot(shore, col='black', add=T, lwd=1)
+plot(oob.sub.spdfT, pch=19, add=T, col=
+       test.cols2[oob.sub.spdfT@data$Substratum1], cex=1.3)
+plot(oob.sub.spdfT2.trim, pch=19, add=T, col=
+       test.cols2[oob.sub.spdfT2.trim@data$Substratum2], cex=0.8)
+plot(oob.sub.spdfT3.trim, pch=19, add=T, col=
+       test.cols2[c(3,5)][oob.sub.spdfT3.trim@data$Substratum3], cex=0.5)
+plot(oob.sub.spdfT4.trim, pch=19, add=T, col=
+       test.cols2[c(3,5)][oob.sub.spdfT4.trim@data$Substratum4], cex=0.2)
+
+
+# legend
+ leg.cols<- c(mud.alt.single, mud.s.alt.single, sand.alt.single,
+gravel.alt.single, cob_bol.alt.single, rock.alt.single)
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+plot(sub.spdfT, col='white')
+
+legend('center', bg='white', legend=leg, fill= leg.cols)
+
+
+
+
+```
+
