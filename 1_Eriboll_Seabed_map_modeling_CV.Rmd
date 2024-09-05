@@ -1,0 +1,1988 @@
+---
+title: "Loch Eriboll seabed map"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_tYpe: console
+---
+
+#setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#required packages
+ library(sf)
+ library(RColorBrewer)
+ library(fields)
+ library(terra)
+ library(gstat)
+ library(randomForest)
+ library(mgcv)
+ library(climateStability)
+
+
+########## import data ########
+
+### Shape files in Data/GIS folder 
+#                       - shore <- shoreline.shp
+
+
+### rasters
+# in Data/GIS folder- depth <- bathy.grd
+#                   -  slo <- slope.grd
+#                   -  asp <- aspect.grd
+
+
+# Data file in data folder
+#                   - dat<- Loch_Eriboll_substratum_combine_cob_boulder.csv
+
+## data tidy
+
+sub$Substratum1<- as.factor(sub$Substratum1)
+sub$Substratum2<- as.factor(sub$Substratum2)
+sub$Substratum3<- as.factor(sub$Substratum3)
+
+sub$Substratum1<- factor(sub$Substratum1, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+
+sub$Substratum2<- factor(sub$Substratum2, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+
+sub$Substratum3<- factor(sub$Substratum3, levels = c("sand", "cob_boulder"))
+
+
+
+## make spatial from the data
+sub.sf<- st_as_sf(x = sub, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+sub.sf<- st_transform(sub.sf, crs = 'EPSG:27700')
+sub.sf<- cbind(sub.sf, st_coordinates(sub.sf))
+
+#make this back into data frame so we have national drid x and y
+sub<- as.data.frame(sub.sf)
+
+```
+
+
+#background map
+```{r}
+
+
+hill.col<- colorRampPalette(c('floralwhite','antiquewhite1', 'antiquewhite2', 'antiquewhite3', 'antiquewhite4'), bias=0.5)
+
+
+depth.heat<- colorRampPalette(rev(brewer.pal(9,'Blues')[2:9]))
+
+hill<- shade(slo, asp, angle=55, direction=100, normalize =T)
+
+plot(hill, col=hill.col(1000), legend=F)
+
+
+plot(depth, add=T, legend=F, col=depth.heat(1000))
+plot(st_geometry(sub.sf), add=T, pch=19, col='dodgerblue3', cex=0.5)
+
+
+
+```
+
+
+
+#Model fitting
+#Mud
+```{r}
+
+# # Check data for duplicates
+nrow(sub)
+summary(sub$Substratum1)
+st_equals(sub.sf)
+
+# 
+# define functions for creating the k-fold train/test data splits a and regression residuals from RF object, initialise evaluation matrix
+
+
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$y) - as.numeric(x$predicted))
+
+
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.mud <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+# 
+
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN #
+  idx <- kfolds[[i]]
+
+  # TRAIN #
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data #
+   obs.test <- sub[!idxBool, "mud"]
+#   
+#   
+#  
+# Ordinary Kriging
+
+  # variogram
+  formMod <- mud ~ X=Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by OLS
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.mud[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+
+# RF calibration  
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "mud"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.mud[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  
+# GLM calibration
+# 
+# 
+  GLM <- glm(formula = mud ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.mud[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+  
+
+
+
+# GAM calibration
+
+#   
+  GAM <- gam(formula = mud ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.mud[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+
+}
+
+
+round(apply(evalData.mud,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.mud,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+
+```
+
+
+## Mud model predictions
+```{r}
+
+### GAM
+# refit model to all
+
+
+GAM1 <- gam(formula = mud ~  s(x, y)+ depth, data = sub.sf, family = binomial)
+summary(GAM1)
+
+## make data frame for predictions
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat)[1]<- c('depth')
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+
+mud.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+mud.r<- rasterize(mud.sf, depth, field="fit")
+
+```
+
+###Mud SE
+```{r}
+
+mud.se.r<- rasterize(mud.sf, depth, field="se.fit")
+
+plot(mud.r)
+plot(mud.se.r)
+
+
+mud.cov.r<- climateStability::rescale0to1(mud.se.r/mud.r)
+plot(mud.cov.r)
+
+```
+
+## Mud RF prediction
+```{r}
+
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat.rf<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+str(mod.dat.rf)
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+
+
+RF.mod<- randomForest(y = as.factor(sub$mud), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+coord.tmp<- cbind(Pred.rf$X, Pred.rf$Y)
+
+# make spatial 
+mud.sf.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+
+mud.rf.r<- rasterize(mud.sf.rf, depth, field="fit")
+
+```
+
+##mud krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- mud ~ X=Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+  
+#
+
+
+## make data for prediction from depth
+
+new.dat.k<- st_as_sf(depth.val)
+geom(depth.val)
+new.dat.k<- cbind(new.dat.k, geom(depth.val)[,3:4] )
+head(new.dat.k)
+names(new.dat.k)<- c('depth', 'X', 'Y', 'geometry') 
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+mud.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+mud.k<- rescale0to1(mud.k)
+
+
+```
+
+
+# Muddy_sand
+```{r}
+ 
+# 
+# # Check data for duplicates
+nrow(sub)
+summary(sub$Substratum1)
+
+
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$Y) - as.numeric(x$predicted))
+# 
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.mudSand <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+#
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN 
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data
+   obs.test <- sub[!idxBool, "muddy_sand"]
+#   
+#   
+#   
+
+#  Ordinary Kriging
+# 
+#     
+  # variogram
+  formMod <- muddy_sand ~ X+Y+ depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by OLS
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.mudSand[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+
+# RF calibration
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "muddy_sand"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.mudSand[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  
+#   
+#   
+
+# GLM calibration
+
+# 
+  GLM <- glm(formula = muddy_sand ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.mudSand[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+ 
+
+
+#   
+
+# GAM calibration
+#   
+#   
+  GAM <- gam(formula = muddy_sand ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.mudSand[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+}
+
+
+
+round(apply(evalData.mudSand,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.mudSand,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+
+```
+
+
+## Muddy_sand model predictions
+```{r}
+
+#
+# refit model to all
+
+
+GAM1 <- gam(formula = muddy_sand ~  s(x, y)+ depth, data = sub.sf, family = binomial)
+
+
+
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+
+muddy.sand.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+muddy_sand.r<- rasterize(muddy.sand.sf, depth, field="fit")
+
+
+```
+
+###Muddy sand SE
+```{r}
+
+muddy_sand.se.r<- rasterize(muddy.sand.sf, depth, field="se.fit")
+
+
+plot(muddy_sand.r)
+plot(muddy_sand.se.r)
+
+muddy_sand.cov.r<- climateStability::rescale0to1(muddy_sand.se.r/muddy_sand.r)
+
+```
+
+
+## Muddy_sand RF prediction
+```{r}
+
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat.rf<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+
+
+
+RF.mod<- randomForest(y = as.factor(sub$muddy_sand), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$Y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+coord.tmp<- cbind(Pred.rf$X, Pred.rf$Y)
+
+# make spatial 
+muddy_sand.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+muddy_sand.rf.r<-rasterize(muddy_sand.rf, depth, 'fit', fun=mean)
+
+```
+
+
+##muddy_sand krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- muddy_sand ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+  
+#
+  
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+
+muddy_sand.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+muddy_sand.k<- rescale0to1(muddy_sand.k)
+
+```
+
+
+# sand
+```{r}
+
+# 
+# # Check data for duplicates.
+nrow(sub)
+summary(sub$Substratum1)
+
+# 
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$Y) - as.numeric(x$predicted))
+
+
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.sand <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN 
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test
+   obs.test <- sub[!idxBool, "sand"]
+#   
+#   
+#Ordinary Kriging
+#     
+  # Make variogram
+  formMod <- sand ~ X+Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.sand[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+
+# RF calibration
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "sand"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.sand[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+ 
+
+#GLM calibration
+# 
+  GLM <- glm(formula = sand ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.sand[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+ 
+
+#GAM calibration
+#
+#   
+  GAM <- gam(formula = sand ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.sand[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+ 
+}
+
+
+round(apply(evalData.sand,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.sand,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+```
+
+
+## sand model predictions
+```{r}
+
+# refit model to all
+
+GAM1 <- gam(formula = sand ~  s(x, y)+ depth, data = sub.sf, family = binomial)
+
+
+
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+
+sand.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+sand.r<- rasterize(sand.sf, depth, field="fit")
+
+
+```
+
+
+###Sand SE
+```{r}
+
+sand.se.r<- rasterize(sand.sf, depth, field="se.fit")
+
+plot(sand.r)
+plot(sand.se.r)
+
+
+sand.cov.r<- climateStability::rescale0to1(sand.se.r/sand.r)
+
+```
+
+
+
+## sand RF prediction
+```{r}
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat.rf<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+
+RF.mod<- randomForest(y = as.factor(sub$sand), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$Y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+# make spatial 
+sand.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+sand.rf.r<-rasterize(sand.rf, depth, 'fit', fun=mean)
+
+```
+
+
+##sand krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- sand ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram 
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+  
+  
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+sand.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+sand.k<- rescale0to1(sand.k)
+
+
+```
+
+
+
+# gravel
+```{r}
+# 
+
+# # Check data for duplicates
+nrow(sub)
+summary(sub$Substratum1)
+
+
+# 
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$Y) - as.numeric(x$predicted))
+
+
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.gravel <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN indices as integer
+  idx <- kfolds[[i]]
+
+  # TRAIN indices as a boolean vector
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data for the target variable
+   obs.test <- sub[!idxBool, "gravel"]
+#   
+
+#Ordinary Kriging
+
+#     
+  # Make variogram
+  formMod <- gravel ~ X+Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.gravel[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+
+#   RF calibration
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "gravel"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.gravel[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+ 
+#   
+#GLM calibration
+# 
+  GLM <- glm(formula = gravel ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.gravel[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+  
+#GAM calibration
+#   
+  GAM <- gam(formula = gravel ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.gravel[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+
+}
+
+
+round(apply(evalData.gravel,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.gravel,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+
+```
+
+
+## gravel model predictions
+```{r}
+
+
+# refit model to all
+
+GAM1 <- gam(formula = gravel ~  s(x,y)+ depth, data = sub.sf, family = binomial)
+
+
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+
+gravel.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+gravel.r<- rasterize(gravel.sf, depth, field="fit")
+
+```
+
+##Gravel SE
+```{r}
+gravel.se.r<- rasterize(gravel.sf, depth, field="se.fit")
+plot(gravel.r)
+plot(gravel.se.r)
+
+gravel.cov.r<- climateStability::rescale0to1(gravel.se.r/gravel.r)
+
+
+```
+
+
+
+## gravel RF prediction
+```{r}
+
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat.rf<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+
+
+RF.mod<- randomForest(y = as.factor(sub$gravel), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$Y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+# make spatial 
+gravel.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+
+gravel.rf.r<-rasterize(gravel.rf.r, depth, 'fit', fun=mean)
+
+
+```
+
+
+##gravel krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- gravel ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+
+gravel.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+gravel.k<- rescale0to1(gravel.k)
+
+
+```
+
+
+
+#Cobble-boulder
+```{r}
+
+# 
+# # Check data for duplicates.
+nrow(sub)
+summary(sub$Substratum1)
+
+
+# 
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$Y) - as.numeric(x$predicted))
+
+
+
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.cob <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN 
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data 
+   obs.test <- sub[!idxBool, "cob_boulder"]
+#   
+
+# Ordinary Kriging
+#     
+  # Make variogram
+  formMod <- cob_boulder ~ X+Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram 
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.cob[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+
+#RF calibration
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "cob_boulder"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.cob[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  
+
+
+#GLM calibration
+# 
+  GLM <- glm(formula = cob_boulder ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.cob[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+  
+
+
+#  GAM calibration
+#   
+  GAM <- gam(formula = cob_boulder ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.cob[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+}
+
+
+round(apply(evalData.cob,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.cob,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+
+```
+
+
+## Cob_boulder model predictions
+```{r}
+
+
+# refit model to all
+
+
+GAM1 <- gam(formula = cob_boulder ~  s(x,y)+ depth, data = sub.sf, family = binomial)
+
+
+
+
+
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+boulder.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+boulder.r<- rasterize(boulder.sf, depth, field="fit")
+
+
+```
+
+###Cob_boulder SE
+```{r}
+cob_boulder.se.r<- rasterize(boulder.sf, depth, field="se.fit")
+plot(boulder.r)
+plot(cob_boulder.se.r)
+
+
+cob_boulder.cov.r<- climateStability::rescale0to1(cob_boulder.se.r/boulder.r)
+
+
+```
+
+
+
+## Cob-boulder RF prediction
+```{r}
+
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat.rf<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+
+
+RF.mod<- randomForest(y = as.factor(sub$cob_boulder), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$Y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+# make spatial 
+cob_boulder.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+
+cob_boulder.rf.r<-rasterize(cob_boulder.rf, depth, 'fit', fun=mean)
+
+```
+
+
+##Cob_boulder krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- cob_boulder ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram 
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+     
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+cob_boulder.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+cob_boulder.k<- rescale0to1(cob_boulder.k)
+
+
+```
+
+
+# rock
+```{r}
+# 
+# 
+# # Check data for duplicates.
+nrow(sub)
+summary(sub$Substratum1)
+
+
+# 
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+
+resid.RF <- function(x) return(as.numeric(x$Y) - as.numeric(x$predicted))
+
+
+# 
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.rock <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN 
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data 
+   obs.test <- sub[!idxBool, "rock"]
+#   
+#Ordinary Kriging
+#     
+  # Make variogram
+  formMod <- rock ~ X+Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.rock[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+
+# RF calibration
+#
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "rock"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.rock[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  
+
+# GLM calibration
+# 
+  GLM <- glm(formula = rock ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.rock[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+
+# GAM calibration
+#   
+  GAM <- gam(formula = rock ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.rock[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+
+}
+
+
+
+round(apply(evalData.rock,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+min(round(apply(evalData.rock,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x,na.rm=TRUE))),3)[1,])
+
+
+
+```
+
+
+
+## rock model predictions
+```{r}
+
+# refit model to all
+
+GAM1 <- gam(formula = rock ~  s(x,y)+ s(depth), data = sub.sf, family = binomial)
+
+
+
+PredGAM <- as.data.frame(predict(GAM1, newdata=mod.dat, type="response", se.fit=T))
+PredGAM<- cbind(xy, PredGAM, 'depth'=mod.dat$depth)
+
+
+rock.sf<- st_as_sf(x = PredGAM, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+rock.r<- rasterize(rock.sf, depth, field="fit")
+
+
+```
+
+###Rock SE
+```{r}
+rock.se.r<- rasterize(rock.sf, depth, field="se.fit")
+plot(rock.r)
+plot(rock.se.r)
+
+
+
+rock.cov.r<- climateStability::rescale0to1(rock.se.r/rock.r)
+
+
+```
+
+
+## rock RF prediction
+```{r}
+
+
+depth.val<- as.points(depth, values=TRUE)
+depth.val[[1]]
+xy<- geom(depth.val)
+
+mod.dat<- data.frame('depth'=depth.val[[1]], 'X'= xy[,3], 'Y'= xy[,4])
+names(mod.dat.rf)[1]<- c('depth')
+
+mod.dat.rf<- na.omit(mod.dat.rf)
+summary(mod.dat.rf)
+names(sub)
+
+RF.mod<- randomForest(y = as.factor(sub$rock), 
+                     x = sub[,c( 2,3,13)],
+                     ntree = 500,
+                     mtry = 2)
+
+ 
+rf.pred <- data.frame(predict(RF.mod, newdata =mod.dat.rf, type="response"))
+
+
+Pred.rf <- cbind('y'= mod.dat.rf$y, 'x'= mod.dat.rf$X, rf.pred, 'depth'=mod.dat.rf$depth)
+
+names(Pred.rf)[3]<- c('fit')
+
+Pred.rf$fit<- as.numeric(Pred.rf$fit)
+
+rock.rf<- st_as_sf(x = Pred.rf, 
+                        coords = c("X", "Y"), remove=FALSE,
+                        crs = 'EPSG:27700')
+
+
+
+rock.rf.r<-rasterize(rock.rf, depth, 'fit', fun=mean)
+
+```
+
+
+##rock krig
+```{r}
+
+# re fit model to all data
+
+ formMod <- rock ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf)
+#
+#   # Variogram
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+  
+  
+#   # kriging predictions
+  krig.est <- krige(formula = formMod ,
+              locations = sub.sf,
+              model = variogFitOLS,
+              newdata = new.dat.k,
+              debug.level = 0)
+
+
+
+
+rock.k<- rasterize(krig.est, depth, field = 'var1.pred', fun= mean)
+
+
+rock.k<- rescale0to1(rock.k)
+
+```
+
+
+
+# overall performance
+```{r}
+
+#overall model performance
+
+evals<- rbind(evalData.mud, evalData.mudSand, evalData.sand, evalData.gravel, evalData.cob, evalData.rock)
+
+round(apply(evals,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+```
+
+
+
+### RMSE performance loop combined
+```{r}
+
+K<- 5
+
+kfoldSplit <- function(x, k=K, train=TRUE){
+  x <- sample(x, size = length(x), replace =FALSE)
+  out <- suppressWarnings(split(x, factor(1:K)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# 
+# # Regression residuals from RF 
+resid.RF <- function(x) return(as.numeric(x$y) - as.numeric(x$predicted))
+
+
+# 
+ kfolds <- kfoldSplit(1:nrow(sub), k = K, train = TRUE)
+# 
+ evalData.mud <- matrix(NA, nrow=K, ncol=4, 
+                    dimnames = list(1:K, c("OK","RF", "GLM","GAM")))
+# 
+# 
+ 
+ #number of iterations
+N<- 100
+first.run=TRUE
+
+for (i in 1:N){
+
+ 
+ 
+ 
+# 
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN 
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data 
+   obs.test <- sub[!idxBool, "mud"]
+#   
+#   
+#   
+#  OK
+#     
+  # Make variogram
+  formMod <- mud ~ X+Y +depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.mud[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+#   RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "mud"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.mud[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  
+#   
+#   GLM
+# 
+  GLM <- glm(formula = mud ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.mud[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+  
+#   GAM
+#   
+  GAM <- gam(formula = mud ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.mud[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+}
+
+
+
+
+#muddy_sand
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN
+  idx <- kfolds[[i]]
+
+  # TRAIN
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data
+   obs.test <- sub[!idxBool, "muddy_sand"]
+#   
+#   
+# OK
+#     
+  # Make variogram
+  formMod <- muddy_sand ~ X+Y+ depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.mudSand[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+#   RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "muddy_sand"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.mudSand[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+
+#   
+#   GLM
+# 
+  GLM <- glm(formula = muddy_sand ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.mudSand[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+  
+ 
+# GAM
+#  
+#   
+  GAM <- gam(formula = muddy_sand ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.mudSand[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+ 
+
+}
+
+
+
+
+#sand
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN
+  idx <- kfolds[[i]]
+
+  # TRAIN
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data 
+   obs.test <- sub[!idxBool, "sand"]
+#   
+#   
+#  OK
+#     
+  # Make variogram
+  formMod <- sand ~ X=Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.sand[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "sand"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.sand[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+ 
+#   GLM
+# 
+  GLM <- glm(formula = sand ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.sand[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+
+
+
+#   
+# GAM
+#   
+  GAM <- gam(formula = sand ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.sand[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+ 
+
+}
+
+
+
+
+
+#gravel
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN
+  idx <- kfolds[[i]]
+
+  # TRAIN
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data
+   obs.test <- sub[!idxBool, "gravel"]
+#   
+
+# OK
+# 
+#     
+  # Make variogram
+  formMod <- gravel ~ X=Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram 
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.gravel[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+#   RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "gravel"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.gravel[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+#   
+#   
+#   GLM
+# 
+  GLM <- glm(formula = gravel ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.gravel[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+ 
+
+
+
+#   GAM
+#   
+  GAM <- gam(formula = gravel ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.gravel[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+  
+  
+
+}
+
+
+
+# cobble boulder
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN
+  idx <- kfolds[[i]]
+
+  # TRAIN 
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data
+   obs.test <- sub[!idxBool, "cob_boulder"]
+#   
+#   
+# OK
+#   
+#     
+  # Make variogram
+  formMod <- cob_boulder ~ X=Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram fitting by Ordinary Least Sqaure
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.cob[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+# RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "cob_boulder"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.cob[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+ 
+  
+
+#   
+#   
+# GLM
+# 
+  GLM <- glm(formula = cob_boulder ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.cob[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+ 
+
+
+#   
+#  GAM
+#   
+  GAM <- gam(formula = cob_boulder ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.cob[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+ 
+}
+
+
+ 
+#rock
+for(i in 1:K){
+
+
+  cat("K-fold...",i,"of",K,"....\n")
+
+  # TRAIN
+  idx <- kfolds[[i]]
+
+  # TRAIN
+  idxBool <- (1:nrow(sub)) %in% idx
+#   
+    # Observed test data
+   obs.test <- sub[!idxBool, "rock"]
+#   
+#   
+# OK
+#     
+  # Make variogram
+  formMod <- rock ~ X=Y+depth
+  mod <- vgm(model  = "Exp")
+  variog <- variogram(formMod, sub.sf[idxBool, ])
+#
+#   # Variogram
+  variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+#
+#   # kriging predictions
+  OK <- krige(formula = formMod ,
+              locations = sub.sf[idxBool, ],
+              model = variogFitOLS,
+              newdata = sub.sf[!idxBool, ],
+              debug.level = 0)
+
+  ok.pred.test <- OK$var1.pred
+  evalData.rock[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#   
+#  RF
+# 
+  RF <- randomForest(y = as.factor(sub[idx, "rock"]),
+                     x = sub[idx, c('x', 'y', 'depth')],
+                     ntree = 500,
+                     mtry = 2)
+#   
+  rf.pred.test <- predict(RF, newdata = sub[-idx,c(2,3,13,18)], type="response")
+  evalData.rock[i,"RF"] <- sqrt(mean(as.numeric(as.character(rf.pred.test)) - obs.test)^2)
+
+  #
+
+  
+
+#   
+#   
+#GLM
+# 
+  GLM <- glm(formula = rock ~ depth + y, data =  sub.sf[idx, ], family='binomial')
+
+  glm.pred.test <- predict(GLM, newdata = sub.sf[-idx,], type="response")
+  evalData.rock[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+
+
+
+
+#   GAM
+#   
+  GAM <- gam(formula = rock ~  s(x, y)+ s(depth), data = sub.sf[idx, ], family = binomial)
+
+  gam.pred.test <- predict(GAM, newdata = sub.sf[-idx,], type="response")
+  evalData.rock[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+
+}
+
+
+if(first.run==TRUE){
+
+
+evals<- rbind(evalData.mud, evalData.mudSand, evalData.sand, evalData.gravel, evalData.cob, evalData.rock)
+
+}  else {
+ 
+ evals.tmp<- rbind(evalData.mud, evalData.mudSand, evalData.sand, evalData.gravel, evalData.cob, evalData.rock)
+ 
+ evals<- rbind(evals, evals.tmp)
+       
+}
+
+print(evals)
+first.run=FALSE
+
+}
+
+
+round(apply(evals,2,FUN = function(x, na.rm=TRUE) c(mean(x,na.rm=TRUE), sd(x, na.rm=TRUE))),3)
+
+
+
+```
+
