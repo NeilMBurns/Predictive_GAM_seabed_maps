@@ -1,0 +1,1262 @@
+---
+title: "Loch Eriboll seabed map"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+#setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#required packages
+
+ library(sf)
+ library(RColorBrewer)
+ library(fields)
+ library(terra)
+ library(gstat)
+ library(randomForest)
+ library(mgcv)
+
+
+########## import data ########
+
+### Shape files inData/GIS folder 
+#                       - shore <- shoreline.shp
+
+
+
+
+### rasters
+# in Data/GIS folder- depth <- bathy.grd
+#                   -  slo <- slope.grd
+#                   -  asp <- aspect.grd
+
+
+# Data file in data data folder
+#                   - dat<- Loch_Eriboll_substratum_combine_cob_boulder.csv
+
+
+
+# Data file in Data/GIS/Substrata_Output_from_script_1 folder
+
+# substrata
+# mud.cov.r<- mud_se_pred.grd
+# 
+# muddy_sand.cov.r<- muddy_s_se_pred.grd
+# 
+# sand.cov.r<- sand_se_pred.grd
+# 
+# 
+# gravel.cov.r<- gravel_se_pred.grd
+# 
+# cob_boulder.cov.r<- cob_se_boul_pred.grd
+# 
+# rock.cov.r<- rock_se_pred.grd
+# 
+############################################
+# Read in rasters of OK and RF for supplemental material
+####################################
+
+# Cov for GAM model
+# mud.rf<- mud_pred_rf.grd
+# 
+# muddy_sand.rf<- muddy_s_rf_pred.grd
+# 
+# sand.rf<- sand_rf_pred.grd
+# 
+# 
+# gravel.rf<- gravel_rf_pred.grd
+# 
+# cob_boulder.rf<- cob_boul_rf_pred.grd
+# 
+# rock.rf<- rock_rf_pred.grd
+
+
+# RF
+# mud.rf<- mud_pred_rf.grd
+# 
+# muddy_sand.rf<- muddy_s_rf_pred.grd
+# 
+# sand.rf<- sand_rf_pred.grd
+# 
+# 
+# gravel.rf<- gravel_rf_pred.grd
+# 
+# cob_boulder.rf<- cob_boul_rf_pred.grd
+# 
+# rock.rf<- rock_rf_pred.grd
+
+
+# Krig
+# mud.k<- mud_pred_k.grd
+# 
+# muddy_sand.k<- muddy_s_k_pred.grd
+# 
+# sand.k<- sand_k_pred.grd
+# 
+# 
+# gravel.k<- gravel_k_pred.grd
+# 
+# cob_boulder.k<- cob_boul_k_pred.grd
+# 
+# rock.k<- rock_k_pred.grd
+
+
+
+## data tidy
+
+sub<- subset(dat, dat$Substratum1!='')
+sub<- sub[,-12]
+sub<- droplevels(sub)
+
+
+
+
+sub$Substratum1<- as.factor(sub$Substratum1)
+sub$Substratum2<- as.factor(sub$Substratum2)
+sub$Substratum3<- as.factor(sub$Substratum3)
+
+
+
+
+levels(sub$Substratum1)
+sub$Substratum1<- factor(sub$Substratum1, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+levels(sub$Substratum1)
+
+
+levels(sub$Substratum2)
+sub$Substratum2<- factor(sub$Substratum2, levels = c("mud", "muddy_sand","sand", "gravel", "cob_boulder", "rock"))
+
+levels(sub$Substratum3)
+sub$Substratum3<- factor(sub$Substratum3, levels = c("sand", "cob_boulder"))
+
+
+
+## make an spatial from the data
+sub.sf<- st_as_sf(x = sub, 
+                        coords = c("x", "y"), remove=FALSE,
+                        crs = "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0")
+
+sub.sf<- st_transform(sub.sf, crs = 'EPSG:27700')
+sub.sf<- cbind(sub.sf, st_coordinates(sub.sf))
+
+#make this back into data frame so we have national grid x and y
+sub<- as.data.frame(sub.sf)
+
+#colours for prediction maps
+couls<- rev(brewer.pal(11,'Spectral'))
+couls<- c( '#FFFFFF', couls)
+
+prob.heat<- colorRampPalette(couls)
+
+depth.heat<- colorRampPalette(rev(brewer.pal(9,'Blues')[2:9]))
+
+
+rf.cols<- c(brewer.pal(11,'Spectral')[11], brewer.pal(11,'Spectral')[1])
+
+
+```
+
+
+#Background map
+```{r}
+
+
+hill.col<- colorRampPalette(c('floralwhite','antiquewhite1', 'antiquewhite2', 'antiquewhite3', 'antiquewhite4'), bias=0.5)
+
+
+depth.heat<- colorRampPalette(rev(brewer.pal(9,'Blues')[2:9]))
+
+hill<- shade(slo, asp, angle=55, direction=100, normalize =T)
+
+plot(hill, col=hill.col(1000), legend=F)
+
+
+plot(depth, add=T, legend=F, col=depth.heat(1000))
+plot(st_geometry(sub.sf), add=T, pch=19, col='dodgerblue3', cex=0.5)
+
+
+
+```
+
+
+
+# fig 1 sample location maps
+```{r Spatial data, include=FALSE}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F, axes=NULL)
+
+plot(depth, add=T, legend=F, col=depth.heat(1000))
+plot(shore, add=T, col='black', lwd=0.8)
+plot(st_geometry(sub.sf), add=T, pch=19, col='black', cex=0.7)
+
+
+```
+
+
+# Substrata vecrors tidy 
+```{r}
+
+
+
+plot(hill, col=hill.col(1000), legend=F, add=T)
+plot(depth, add=T, col=depth.heat(1000), legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+
+plot(sub.sf, pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[sub.sf$Substratum1], cex=2)
+
+sub.sf2<- sub.sf[,10]
+
+ 
+```
+
+#Fig 3 Plot
+```{r}
+
+# set up some colour options
+ test.cols <- c(
+     rgb(253,192,134, maxColorValue = 255),
+     rgb(127,201,127, maxColorValue = 255),
+     rgb(255,255,153, maxColorValue = 255),
+     rgb(240,2,127, maxColorValue = 255),
+     rgb(190,174,212, maxColorValue = 255),
+     rgb(56,108,176, maxColorValue = 255)
+     )
+
+
+test.cols2<- c(
+            rgb(255,127,0, maxColorValue = 255),
+             rgb(77,175,74, maxColorValue = 255),
+            rgb(255,255,51, maxColorValue = 255),
+            rgb(228,26,28, maxColorValue = 255),
+           
+            rgb(152,78,163, maxColorValue = 255),
+            rgb(55,126,184, maxColorValue = 255)
+            )
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+
+plot(hill, col=hill.col(1000), legend=F, axes=NULL)
+
+plot(depth, add=T, legend=F, col=depth.heat(1000))
+plot(shore, add=T, col='black', lwd=0.8)
+
+plot(sub.sf, pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[c(2:6,8)][sub.sf$Substratum1], cex=1.5)
+
+plot(sub.sf, pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[c(2:6,8)][sub.sf$Substratum2], cex=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[c(4,6)][sub.sf$Substratum3], cex=0.5)
+
+
+
+
+
+
+## legend
+
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+leg<- c("mud", "muddy sand", "sand", "gravel", "cobble boulder", "rock" )
+
+legend('center', legend=leg, pch=19, cex=1.3,col= test.cols2, bg='white')
+
+
+
+## depth legend
+ 
+plot(NULL)
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+image.plot((depth*-1), horizontal=F, smallplot= c(0.6, 0.63,0.1,0.9), col = depth.heat(1000), legend.only=TRUE,  axis.args = list(cex.axis = 1,
+at = c(0, 20, 40, 60, 80, 100)+15, labels =rev(c("0","20","40","60","80","100")), 
+tcl=0.3, lwd=0.5, hadj=0.5), axes=F, zlim=c(0, 115))
+
+
+```
+
+#Mud
+
+## Mud model predictions 
+```{r}
+
+
+
+mud.r<- mud.r
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(sub.sf, col='white')
+plot(hill.r, col=hill.col(1000), legend=F,  axes=FALSE, box=F, add=T)
+plot(shore, col='black', add=T, lwd=1)
+
+plot(mud.r, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000) )
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=0.9)
+
+plot(sub.sf[sub.sf$Substratum1 == "mud" ,], pch=19, add=T, col=
+       test.cols2[1], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "mud" ,], pch=19, add=T, col=
+       test.cols2[1], cex=1.1)
+
+
+
+#mud legend
+
+
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+legend('center', bg='white',pch=19, cex=1.3, legend=leg, col=c( test.cols2[1], 'black', 'black', 'black', 'black', 'black'))
+
+
+
+
+
+
+```
+
+#heat map legend for all substrata
+```{r}
+
+par(mar=c(0,0,0,0)+0.1)
+
+image.plot((mud.r), horizontal=F, smallplot= c(0.6, 0.63,0.1,0.9), col = prob.heat(1000), legend.only=TRUE,  axis.args = list(cex.axis = 1,
+at = c(0, 22, 50, 75, 100), labels =c("0","0.25","0.5","0.75","1.0"), 
+tcl=0.3, lwd=0.5, hadj=0.5), axes=F, zlim=c(0, 100))
+
+
+```
+
+## Mud SE
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(mud.cov.r, add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "mud" ,], pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[2], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "mud" ,], pch=19, add=T, col=
+       brewer.pal(8,"Dark2")[2], cex=1.1)
+
+```
+
+
+##SE heat map legend
+```{r}
+
+plot(NULL)
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+image.plot((mud.cov.r), horizontal=F, smallplot= c(0.6, 0.63,0.1,0.9), col = rev(terrain.colors(1000)), legend.only=TRUE,  axis.args = list(cex.axis = 1,
+at = c(0, 22, 50, 75, 100), labels =c("0","0.25","0.5","0.75","1.0"), 
+tcl=0.3, lwd=0.5, hadj=0.5), axes=F, zlim=c(0, 100))
+
+
+
+
+```
+
+
+
+## Mud RF prediction
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, col='white', add=T, legend=F)
+plot(mud.rf, add=T, legend=FALSE, axes=FALSE, col=rf.cols)
+
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "mud" ,], pch=19, add=T, col=
+       test.cols2[1], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "mud" ,], pch=19, add=T, col=
+      test.cols2[1], cex=1.1)
+
+
+
+```
+
+
+## mud krig predictions
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(mud.k, add=T, legend=FALSE, axes=FALSE, col= prob.heat((1000)))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "mud" ,], pch=19, add=T, col=
+       test.cols2[1], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "mud" ,], pch=19, add=T, col=
+       test.cols2[1], cex=1.1)
+
+
+
+```
+
+
+
+# Muddy_sand
+
+## Muddy_sand model predictions
+```{r}
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+
+plot(muddy_s.r, col=prob.heat(1000), add=T, legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+# legend
+
+ par(mar=c(0,0,0,0)+0.1)
+ plot(NULL)
+ 
+ legend('center', bg='white',pch=19, cex=1.3, legend=leg, col=c('1', test.cols2[2], '1', '1', '1','1'))
+
+
+
+
+
+
+
+```
+
+
+## Muddy sand SE
+```{r}
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(muddy_sand.cov.r, add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+
+
+```
+
+## Muddy_sand RF prediction
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, col='white', add=T, legend=F)
+
+plot(muddy_s.rf, add=T, legend=FALSE, axes=FALSE, col=rf.cols)
+plot(shore, col='black', add=T, lwd=1)
+
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+
+
+```
+
+
+##muddy_sand krig
+```{r}
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(muddy_s_k, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "muddy_sand" ,], pch=19, add=T, col=
+       test.cols2[2], cex=1.1)
+
+
+```
+
+
+# sand
+
+## sand model predictions
+```{r}
+
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+
+
+plot(sand.r, col = prob.heat(1000), add=T, legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "sand" ,], pch=19, add=T, col=
+       test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "sand" ,], pch=19, add=T, col=
+      test.cols2[3], cex=1.1)
+
+# legend
+
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+legend('center', bg='white', pch=19, cex=1.3, legend=leg, col=c('1', '1',  test.cols2[3], '1', '1', '1'))
+
+
+
+
+
+```
+
+
+## Sand SE
+```{r}
+
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(sand.cov.r, add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "sand" ,], pch=19, add=T, col=
+       test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "sand" ,], pch=19, add=T, col=
+      test.cols2[3], cex=1.1)
+
+
+
+```
+
+
+
+## sand RF prediction
+```{r}
+
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, col='white', add=T, legend=F)
+
+plot(sand.rf, add=T, legend=FALSE, axes=FALSE,col=rf.cols)
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "sand" ,], pch=19, add=T, col=
+      test.cols2[3], cex=1.1)
+
+
+
+
+
+```
+
+
+##sand krig
+```{r}
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(sand_k, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "sand" ,], pch=19, add=T, col=
+        test.cols2[3], cex=1.1)
+
+
+
+
+```
+
+
+
+# gravel
+
+
+## gravel model predictions
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+
+plot(gravel.r, col = prob.heat(1000), add=T, legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+# legend
+
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+
+legend('center',bg='white', pch=19, cex=1.3, legend=leg, col=c('1','1','1', test.cols2[4], '1', '1'))
+
+
+
+```
+
+
+## gravel SE
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(gravel.cov.r, add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+
+
+```
+
+
+
+## gravel RF prediction
+```{r}
+ 
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, col='white', add=T, legend=F)
+
+plot(gravel.rf, add=T, legend=FALSE, axes=FALSE, col=rf.cols)
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+
+
+```
+
+
+##gravel krig prdiction
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(gravel.k, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "gravel" ,], pch=19, add=T, col=
+       test.cols2[4], cex=1.1)
+
+#legend
+
+legend('bottomright', legend=leg, fill=c('black', 'black', 'black', test.cols2[4], 'black', 'black'))
+
+
+
+
+```
+
+
+
+#Cobble-boulder
+
+
+## Cob_boulder model predictions
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+
+plot(cob_boulder.r, col = prob.heat(1000), add=T, legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+
+plot(sub.sf[sub.sf$Substratum2 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "cob_boulder" ,], pch=19, add=T, col=
+     test.cols2[5], cex=1.1)
+
+#legend
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+legend('center',bg='white', pch=19, cex=1.3, legend=leg, col=c('1','1','1','1', test.cols2[5],'1'))
+
+
+
+
+
+```
+
+
+## cob_boulder SE
+```{r}
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(cob_boulder.cov.r,add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+
+plot(sub.sf[sub.sf$Substratum2 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "cob_boulder" ,], pch=19, add=T, col=
+     test.cols2[5], cex=1.1)
+
+
+
+```
+
+
+
+
+
+
+
+
+## Cob-boulder RF prediction
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(cob_boulder.cov.r,add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+
+plot(sub.sf[sub.sf$Substratum2 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "cob_boulder" ,], pch=19, add=T, col=
+     test.cols2[5], cex=1.1)m3 == "cob_boulder" ,], pch=19, add=T, col=
+     test.cols2[5], cex=1.1)
+
+
+
+```
+
+
+##Cob_boulder krig
+```{r}
+
+ 
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(cob_boulder.k, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum3 == "cob_boulder" ,], pch=19, add=T, col=
+       test.cols2[5], cex=1.1)
+
+
+
+```
+
+
+# rock
+
+
+## rock model predictions
+```{r}
+
+
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+
+plot(rock.r, col = prob.heat(1000), add=T, legend=FALSE, axes=FALSE)
+plot(shore, col='black', add=T, lwd=1)
+
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+
+
+# legend
+par(mar=c(0,0,0,0)+0.1)
+plot(NULL)
+
+
+legend('center', bg='white', pch=19, cex=1.3, legend=leg, col= c('1','1','1','1','1', test.cols2[6]))
+
+
+
+
+
+```
+
+
+## rock SE
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, add=T, col='white', legend=FALSE, axes=FALSE)
+
+
+plot(rock.cov.r, add=T, legend=FALSE, axes=FALSE, col=rev(terrain.colors(1000)) )
+plot(shore, col='black', add=T, lwd=1)
+plot(sub.sf[1], pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+
+
+```
+
+
+
+
+
+## rock RF prediction
+```{r}
+
+
+
+par(mar=c(0,0,0,0)+0.1)
+
+
+plot(hill, col=hill.col(1000), legend=F,  axes=FALSE, box=F)
+plot(depth, col='white', add=T, legend=F)
+
+plot(rock.rf, add=T, legend=FALSE, axes=FALSE, col=rf.cols)
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+
+
+```
+
+
+##rock krig
+```{r}
+
+ 
+par(mar=c(0,0,0,0)+0.1)
+
+plot(hill, col=hill.col(1000),legend=F,  axes=FALSE, box=F)
+plot(rock.k, add=T, legend=FALSE, axes=FALSE, col=prob.heat(1000))
+plot(shore, col='black', add=T, lwd=1)
+
+plot(sub.sf, pch=19, add=T, col=
+       'black', cex=1)
+
+plot(sub.sf[sub.sf$Substratum1 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+plot(sub.sf[sub.sf$Substratum2 == "rock" ,], pch=19, add=T, col=
+       test.cols2[6], cex=1.1)
+
+
+```
+
+
+
+# model plots heatmap legend
+```{r}
+
+
+image.plot((mud.r), horizontal=T, smallplot= c(0.1, 0.9,0.6,0.63), col = rev(terrain.colors(1000)), legend.only=TRUE,  axis.args = list(cex.axis = 1,
+at = c(0, 50, 100), labels =c("0","0.5","1.0"), 
+tcl=0.3, lwd=0.5, hadj=0.5), axes=F, zlim=c(0, 100))
+
+
+
+```
+
+
+## Area calculations set up
+```{r}
+
+# use frequency of probabilities to trim each raster to display reasonable estimates and calculate areas
+# vary trim to to change level of probability of presence and display plot as required
+density(mud.r)
+density(muddy_sand.r)
+density(sand.r)
+density(gravel.r)
+density(cob_boulder.r)
+density(rock.r)
+
+
+mud.r<- mud.r
+muddy_sand.r<- muddy_sand.r
+sand.r<- sand.r
+gravel.r<- gravel.r
+cob_boulder.r<- cob_boulder.r
+rock.r<- rock.r
+
+# E.G of setting substrata boundaries 
+mud.r [mud.r< 0.51] <- NA
+muddy_sand.r [muddy_sand.r< 0.51] <- NA
+sand.r [sand.r< 0.11] <- NA
+gravel.r [gravel.r< 0.05] <- NA
+cob_boulder.r [cob_boulder.r< 0.11] <- NA
+rock.r [rock.r< 0.51] <- NA
+
+
+
+```
+
+
+## area calculations
+```{r}
+
+########  code written before switch to sf and terra - code written for sp and raster
+# overall area
+plot(depth, colNA="dodgerblue")
+cell.No<-cellStats(depth, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(depth)[1]*res(depth)[2])
+round(raster_area/(1000*1000), 2)
+
+mud.r<- mud.r
+muddy_sand.r<- muddy_sand.r
+sand.r<- sand.r
+gravel.r<- gravel.r
+cob_boulder.r<- cob_boulder.r
+rock.r<- rock.r
+
+
+hist(mud.r)
+mud.r [mud.r<= 0.1] <- NA
+density(mud.r)
+
+
+###area calc
+plot(mud.r, colNA="dodgerblue")
+
+cell.No<-cellStats(mud.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(mud.r)[1]*res(mud.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+density(muddy_sand.r)
+muddy_sand.r [muddy_sand.r<= 0.1] <- NA
+density(muddy_sand.r)
+
+###area calc
+plot(muddy_sand.r, colNA="dodgerblue")
+
+cell.No<-cellStats(muddy_sand.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(muddy_sand.r)[1]*res(muddy_sand.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+density(sand.r)
+sand.r [sand.r<= 0.1] <- NA
+density(sand.r)
+
+###area calc
+plot(sand.r, colNA="dodgerblue")
+
+cell.No<-cellStats(sand.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(sand.r)[1]*res(sand.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+
+
+density (gravel.r)
+gravel.r [gravel.r <= 0.1] <- NA
+density(gravel.r)
+
+###area calc
+plot(gravel.r, colNA="dodgerblue")
+
+cell.No<-cellStats(gravel.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(gravel.r)[1]*res(gravel.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+density(cob_boulder.r)
+cob_boulder.r [cob_boulder.r<= 0.1] <- NA
+density(cob_boulder.r)
+
+###area calc
+plot(cob_boulder.r, colNA="dodgerblue")
+
+cell.No<-cellStats(cob_boulder.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(cob_boulder.r)[1]*res(cob_boulder.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+density(rock.r)
+rock.r [rock.r<= 0.1] <- NA
+density(rock.r)
+
+###area calc
+plot(rock.r, colNA="dodgerblue")
+
+cell.No<-cellStats(rock.r, function(i, ...) sum(!is.na(i)))
+
+raster_area<- cell.No * (res(rock.r)[1]*res(rock.r)[2])
+
+#area at >0.1
+round(raster_area/(1000*1000), 2)
+#proportion
+round(round(raster_area/(1000*1000), 2)/total.area,3)
+
+```
